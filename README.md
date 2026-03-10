@@ -99,6 +99,45 @@ Same GPU support matrix as [jsegov/autoresearch-win-rtx](https://github.com/jseg
 - Desktop only (no laptop GPUs). 8 GB variants not supported.
 - Tested on RTX 4080 SUPER 16GB, Windows 11.
 
+## Cross-Platform Comparison: MLX vs Windows + Triton
+
+Head-to-head on the **same dataset** (TinyStories), **same model** (50.3M params, depth 8), **same 5-minute training budget**. Eval uses 40 × 524,288 tokens.
+
+### Hardware
+
+| | Apple MLX | Windows + Triton |
+|---|---|---|
+| Machine | MacBook Pro 16-inch (2023) | Desktop PC |
+| Chip / GPU | Apple M2 Max | NVIDIA RTX 3090 |
+| Memory | 64 GB unified | 24 GB VRAM |
+| Runtime | MLX | PyTorch 2.9 + Triton 3.5 |
+| Compile | MLX JIT | `torch.compile` (max-autotune-no-cudagraphs) |
+
+### Results
+
+| Metric | MLX (M2 Max) | Windows + Triton (RTX 3090) | Delta |
+|---|---|---|---|
+| **val_bpb** | 1.6025 | **0.4713** | **70.6% lower** |
+| **tokens trained** | 6.2M | **59.2M** | **9.5x more** |
+| **training steps** | 94 | **602** | **6.4x more** |
+| **tok/sec** | ~20.5K | **~197K** | **9.6x faster** |
+| **peak memory** | 26.7 GB | **6.0 GB** | **4.5x less** |
+| training time | 302s | 300s | same budget |
+| eval time | ~422s | ~95s | 4.4x faster |
+| total wall clock | 724.5s | 394.8s | 1.8x faster |
+| parameters | 50.3M | 50.3M | identical |
+
+### Why the gap?
+
+The RTX 3090 processes **9.6x more tokens per second**, which compounds into 6.4x more gradient steps in the same budget. More steps = more learning = lower val_bpb. Key factors:
+
+- **Raw compute:** The RTX 3090 (35.6 TFLOPS FP32 / 71 TFLOPS TF32) dramatically outpaces the M2 Max GPU (~13.6 TFLOPS FP32) for matrix-heavy workloads.
+- **Triton + torch.compile** fuse operations and eliminate Python/framework overhead, achieving ~33% MFU vs MLX's less mature compiler.
+- **Smaller effective batch size** (98K vs 65K tokens) enables more frequent weight updates.
+- **Tuned hyperparameters** (lower weight decay, longer warmdown) improve convergence in the high-step regime.
+
+> **Upstream reference:** [karpathy/autoresearch](https://github.com/karpathy/autoresearch) on H100: val_bpb **0.998** in the same 5-minute budget.
+
 ## Notable forks
 
 - [karpathy/autoresearch](https://github.com/karpathy/autoresearch) — original (Linux/H100)
