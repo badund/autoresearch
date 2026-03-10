@@ -15,11 +15,23 @@ from pathlib import Path
 
 os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+if platform.system() == "Windows":
+    os.environ.setdefault("TRITON_CACHE_DIR", "C:\\tc")
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
+
+try:
+    from torch.nn.attention.flex_attention import (
+        flex_attention as _flex_attention,
+        create_block_mask,
+    )
+    _compiled_flex_attention = torch.compile(_flex_attention)
+    HAS_FLEX_ATTENTION = True
+except Exception:
+    HAS_FLEX_ATTENTION = False
 
 from prepare import (
     DATASET_CHOICES,
@@ -128,7 +140,7 @@ def _resolve_gpu_profile(gpu_name, capability, gpu_vram_gb, is_windows):
                 name=f"{arch}-16gb",
                 is_supported_consumer=True,
                 is_compatibility_only=False,
-                train_batch_candidates=(32, 16, 8, 4),
+                train_batch_candidates=(64, 32, 16, 8, 4),
                 checkpoint_modes=(False, True),
                 default_checkpointing=False,
             )
@@ -236,8 +248,12 @@ def detect_runtime():
     if hasattr(torch.backends, "cudnn"):
         torch.backends.cudnn.allow_tf32 = tf32_enabled
 
-    use_compile = False
-    print("torch.compile disabled in this fork runtime path.")
+    force_compile = os.environ.get("AUTORESEARCH_FORCE_COMPILE")
+    if force_compile == "0":
+        use_compile = False
+    else:
+        use_compile = True
+    print(f"torch.compile {'enabled' if use_compile else 'disabled'}.")
     attention_backend = "sdpa"
     print("Using PyTorch SDPA attention backend.")
     force_checkpointing = os.environ.get("AUTORESEARCH_FORCE_CHECKPOINTING")
@@ -265,11 +281,13 @@ def detect_runtime():
     )
 
 
-USE_COMPILE = False
+USE_COMPILE = True
 MUON_COMPUTE_DTYPE = torch.bfloat16
 
 
 def _maybe_compile(obj, **kwargs):
+    if USE_COMPILE:
+        return torch.compile(obj, **kwargs)
     return obj
 
 
@@ -361,18 +379,21 @@ class CausalSelfAttention(nn.Module):
         q = q.transpose(1, 2)  # (B, H, T, D)
         k = k.transpose(1, 2)  # (B, KVH, T, D)
         v = v.transpose(1, 2)  # (B, KVH, T, D)
-        attn_mask = self._get_sdpa_mask(T, window_size, q.device)
-        y = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attn_mask,
-            is_causal=False,
-            enable_gqa=self.n_kv_head < self.n_head,
-        )
-        y = y.transpose(1, 2)
-
-        y = y.contiguous().view(B, T, -1)
+        window = window_size[0] if isinstance(window_size, tuple) else window_size
+        if window is None or window >= T:
+            y = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=None, is_causal=True,
+                enable_gqa=self.n_kv_head < self.n_head,
+            )
+        elif hasattr(self, '_flex_block_mask') and self._flex_block_mask is not None:
+            y = _compiled_flex_attention(q, k, v, block_mask=self._flex_block_mask)
+        else:
+            attn_mask = self._get_sdpa_mask(T, window_size, q.device)
+            y = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=attn_mask, is_causal=False,
+                enable_gqa=self.n_kv_head < self.n_head,
+            )
+        y = y.transpose(1, 2).reshape(B, T, -1)
         y = self.c_proj(y)
         return y
 
@@ -455,6 +476,25 @@ class GPT(nn.Module):
         self.transformer.wte.to(dtype=embed_dtype)
         for ve in self.value_embeds.values():
             ve.to(dtype=embed_dtype)
+
+    def _precompute_block_masks(self, device):
+        if not HAS_FLEX_ATTENTION:
+            return
+        T = self.config.sequence_len
+        block_mask_cache = {}
+        for i, ws in enumerate(self.window_sizes):
+            window = ws[0]
+            if window >= T:
+                self.transformer.h[i].attn._flex_block_mask = None
+                continue
+            cache_key = (T, window)
+            if cache_key not in block_mask_cache:
+                def mask_fn(b, h, q_idx, kv_idx, _w=window):
+                    return (q_idx >= kv_idx) & (q_idx - kv_idx <= _w)
+                block_mask_cache[cache_key] = create_block_mask(
+                    mask_fn, B=None, H=None, Q_LEN=T, KV_LEN=T, device=device,
+                )
+            self.transformer.h[i].attn._flex_block_mask = block_mask_cache[cache_key]
 
     def _precompute_rotary_embeddings(self, seq_len, head_dim, base=10000, device=None, dtype=torch.bfloat16):
         if device is None:
@@ -554,7 +594,7 @@ class GPT(nn.Module):
                         params=chunk,
                         lr=matrix_lr,
                         momentum=0.95,
-                        ns_steps=5,
+                        ns_steps=3,
                         beta2=0.95,
                         weight_decay=weight_decay,
                     )
@@ -759,20 +799,20 @@ HEAD_DIM = 128            # target head dimension for attention
 WINDOW_PATTERN = "SSSL"   # sliding window pattern: L=full, S=half context
 
 # Optimization
-TOTAL_BATCH_SIZE = 2 ** 19
+TOTAL_BATCH_SIZE = 98304
 EMBEDDING_LR = 0.6
 UNEMBEDDING_LR = 0.004
-MATRIX_LR = 0.04
+MATRIX_LR = 0.05
 SCALAR_LR = 0.5
-WEIGHT_DECAY = 0.2
+WEIGHT_DECAY = 0.05
 ADAM_BETAS = (0.8, 0.95)
 WARMUP_RATIO = 0.0
-WARMDOWN_RATIO = 0.5
-FINAL_LR_FRAC = 0.0
+WARMDOWN_RATIO = 0.7
+FINAL_LR_FRAC = 0.02
 
 # Model size + memory defaults
 DEPTH = 8
-DEVICE_BATCH_SIZE = 16
+DEVICE_BATCH_SIZE = 64
 EVAL_BATCH_SIZE = 8
 
 
@@ -855,6 +895,7 @@ def _benchmark_train_candidate(runtime, tokenizer, vocab_size, train_batch_size,
             model = GPT(config)
         model.to_empty(device=runtime.device)
         model.init_weights(embed_dtype=runtime.amp_dtype)
+        model._precompute_block_masks(runtime.device)
         optimizer = model.setup_optimizer(
             unembedding_lr=UNEMBEDDING_LR,
             embedding_lr=EMBEDDING_LR,
@@ -991,10 +1032,14 @@ def _prioritize_autotuned_candidate(train_candidates, autotuned_candidate):
 
 def _configure_step_kernels(runtime):
     global ADAMW_STEP_IMPL, MUON_STEP_IMPL, USE_COMPILE, MUON_COMPUTE_DTYPE
-    ADAMW_STEP_IMPL = adamw_step_fused
-    MUON_STEP_IMPL = muon_step_fused
     MUON_COMPUTE_DTYPE = runtime.amp_dtype
-    USE_COMPILE = False
+    USE_COMPILE = runtime.use_compile
+    if USE_COMPILE:
+        ADAMW_STEP_IMPL = torch.compile(adamw_step_fused, dynamic=False, fullgraph=True)
+        MUON_STEP_IMPL = torch.compile(muon_step_fused, dynamic=False, fullgraph=True)
+    else:
+        ADAMW_STEP_IMPL = adamw_step_fused
+        MUON_STEP_IMPL = muon_step_fused
 
 
 def _run_training_once(runtime, tokenizer, config, device_batch_size, smoke_test):
@@ -1009,6 +1054,7 @@ def _run_training_once(runtime, tokenizer, config, device_batch_size, smoke_test
         model = GPT(config)
     model.to_empty(device=runtime.device)
     model.init_weights(embed_dtype=runtime.amp_dtype)
+    model._precompute_block_masks(runtime.device)
 
     param_counts = model.num_scaling_params()
     num_params = param_counts["total"]
@@ -1029,7 +1075,7 @@ def _run_training_once(runtime, tokenizer, config, device_batch_size, smoke_test
         matrix_lr=MATRIX_LR,
         weight_decay=WEIGHT_DECAY,
     )
-    model = _maybe_compile(model, dynamic=False)
+    model = _maybe_compile(model, dynamic=False, mode="max-autotune-no-cudagraphs")
 
     train_loader = make_dataloader(
         tokenizer,

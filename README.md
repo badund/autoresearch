@@ -1,73 +1,84 @@
-# autoresearch
+# autoresearch (Windows + NVIDIA GPU, Optimized)
 
-> Convert your gaming PC into an autonomous AI researcher.
+> Turn your Windows gaming PC into an autonomous AI researcher — with Triton, `torch.compile`, and tuned hyperparameters.
 
-> This repository is a fork of [karpathy/autoresearch](https://github.com/karpathy/autoresearch). The purpose of this fork is native support for desktop consumer NVIDIA GPUs with at least 10 GB VRAM on Windows, while keeping Linux compatibility paths.
+This fork builds on [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx) (the Windows port of [karpathy/autoresearch](https://github.com/karpathy/autoresearch)) and adds Triton-on-Windows support, `torch.compile`, flex attention, and hyperparameter tuning for consumer NVIDIA GPUs.
 
-![teaser](progress.png)
+## Performance
 
-*One day, frontier AI research used to be done by meat computers in between eating, sleeping, having other fun, and synchronizing once in a while using sound wave interconnect in the ritual of "group meeting". That era is long gone. Research is now entirely the domain of autonomous swarms of AI agents running across compute cluster megastructures in the skies. The agents claim that we are now in the 10,205th generation of the code base, in any case no one could tell if that's right or wrong as the "code" is now a self-modifying binary that has grown beyond human comprehension. This repo is the story of how it all began. -@karpathy, March 2026*.
+All benchmarks on RTX 4080 SUPER 16GB, Windows 11, 5-minute training budget, TinyStories dataset.
 
-The idea: give an AI agent a small but real LLM training setup and let it experiment autonomously overnight. It modifies the code, trains for 5 minutes, checks if the result improved, keeps or discards, and repeats. You wake up in the morning to a log of experiments and (hopefully) a better model. The training code here is a simplified single-GPU implementation of [nanochat](https://github.com/karpathy/nanochat). The core idea is that you're not touching any of the Python files like you normally would as a researcher. Instead, you are programming the `program.md` Markdown files that provide context to the AI agents and set up your autonomous research org. The default `program.md` in this repo is intentionally kept as a bare bones baseline, though it's obvious how one would iterate on it over time to find the "research org code" that achieves the fastest research progress, how you'd add more agents to the mix, etc. A bit more context on this project is here in this [tweet](https://x.com/karpathy/status/2029701092347630069).
+| Version | val_bpb | MFU | Steps | Throughput | VRAM |
+|---------|---------|-----|-------|------------|------|
+| jsegov fork (SDPA + eager) | 1.008 | 12.1% | 52 | 91K tok/s | 11.9 GB |
+| + `torch.compile` only | 0.883 | 15.1% | 62 | 108K tok/s | 6.2 GB |
+| + attention optimizations | 0.611 | 31.4% | 118 | 206K tok/s | 6.1 GB |
+| **This fork (fully tuned)** | **0.472** | **32.5%** | **602** | **197K tok/s** | **6.1 GB** |
 
-## Fork scope
+**53% lower val_bpb**, **2.7x MFU**, **11.6x more gradient steps**, **47% less VRAM** vs the base Windows fork.
 
-- Upstream source: [karpathy/autoresearch](https://github.com/karpathy/autoresearch)
-- Primary objective: run natively on Windows with desktop consumer NVIDIA GPUs that have at least 10 GB VRAM, without unofficial Triton-on-Windows stacks.
-- Scope of changes: compatibility and stability updates required for that target platform.
-- Linux/H100-oriented fast paths are removed in this fork to keep the runtime path simple and consumer-focused.
+### Comparison to jsegov/autoresearch-win-rtx
 
-## How it works
+| | [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx) | This fork |
+|---|---|---|
+| Triton | Not used (explicit non-goal) | `triton-windows 3.5.x` via PyPI |
+| `torch.compile` | Disabled | Enabled (`max-autotune-no-cudagraphs`) |
+| Attention | SDPA with explicit mask | `is_causal=True` + flex_attention for sliding windows |
+| Optimizer kernels | Eager | Compiled (`fullgraph=True`) |
+| Batch size | 2^19 (524K tokens) | 98,304 tokens (tuned sweet spot) |
+| Newton-Schulz iters | 5 | 3 |
+| Weight decay | 0.2 | 0.05 |
+| Warmdown ratio | 0.5 | 0.7 |
+| Final LR fraction | 0.0 | 0.02 |
+| Matrix LR | 0.04 | 0.05 |
 
-The repo is deliberately kept small and only really has a three files that matter:
+## What changed
 
-- **`prepare.py`** — fixed constants, one-time data prep (downloads TinyStories data, trains a BPE tokenizer), and runtime utilities (dataloader, evaluation).
-- **`train.py`** — the single file the agent edits. Contains the full GPT model, optimizer (Muon + AdamW), and training loop. Everything is fair game: architecture, hyperparameters, optimizer, batch size, etc. **This file is edited and iterated on by the agent**.
-- **`program.md`** — baseline instructions for one agent. Point your agent here and let it go. **This file is edited and iterated on by the human**.
+**Triton + compile pipeline.** The jsegov fork intentionally disabled `torch.compile` and Triton to avoid unofficial Windows stacks. The [`triton-windows`](https://pypi.org/project/triton-windows/) package (v3.5.x) now provides official-quality Triton support on Windows via PyPI, enabling the full compile pipeline.
 
-By design, training runs for a **fixed 5-minute time budget** (wall clock, excluding startup/compilation), regardless of the details of your compute. The metric is **val_bpb** (validation bits per byte) — lower is better, and vocab-size-independent so architectural changes are fairly compared.
+**Attention optimizations.** Full-context layers use `is_causal=True` (hardware-accelerated causal mask, no memory allocation). Sliding-window layers use `flex_attention` with precomputed block masks, compiled via `torch.compile`.
 
-## Quick start (PowerShell)
+**Hyperparameter tuning.** Smaller effective batch size (98K tokens vs 524K) yields 5x more gradient steps in the same time budget. Lower weight decay and higher matrix LR suit the undertrained regime (~1.2 tokens per parameter). Longer warmdown with a small final LR floor improves end-of-training convergence.
 
-**Requirements:** A single NVIDIA GPU, Python 3.10+, [uv](https://docs.astral.sh/uv/).
+## Quick start
 
-- Single runtime path uses PyTorch SDPA attention and eager execution (no FA3/`torch.compile` fast path).
-- Native Windows support targets desktop consumer GPUs with >=10 GB VRAM, official PyTorch CUDA wheels, and SDPA attention.
-- Default dataset is now TinyStories GPT-4 clean for practical consumer-GPU setup.
+**Requirements:** Windows 10/11, NVIDIA GPU (10+ GB VRAM), Python 3.10+, [uv](https://docs.astral.sh/uv/).
 
 ```powershell
-
-# 1. Install uv project manager (if you don't already have it)
+# 1. Install uv (if needed)
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
-# 2. Install dependencies
+# 2. Install dependencies (includes triton-windows automatically)
 uv sync
 
 # 3. Download data and train tokenizer (one-time)
-#    Default dataset: TinyStories GPT-4 clean
 uv run prepare.py
 
-# 4. Manually run a single training experiment (~5 min)
+# 4. Smoke test
+uv run train.py --smoke-test
+
+# 5. Full training run (~5 min)
 uv run train.py
 ```
 
-Quick validation run (recommended after setup):
+`uv sync` installs `triton-windows>=3.5,<3.6` from PyPI alongside PyTorch 2.9.1 (CUDA 12.8). No manual Triton installation required.
 
-```powershell
-uv run train.py --smoke-test
-```
+### Environment variables
 
-If the above commands all work ok, your setup is working and you can go into autonomous research mode.
+| Variable | Effect |
+|---|---|
+| `AUTORESEARCH_AUTOTUNE_REFRESH=1` | Re-run the batch size autotune (recommended after GPU or driver changes) |
+| `AUTORESEARCH_DISABLE_AUTOTUNE=1` | Skip autotune, use default batch sizes |
+| `AUTORESEARCH_FORCE_COMPILE=0` | Disable `torch.compile` (fallback to eager) |
+| `AUTORESEARCH_FORCE_CHECKPOINTING=1` | Force activation checkpointing on |
 
 ## Running the agent
-
-Simply spin up your Claude/Codex or whatever you want in this repo (and disable all permissions), then you can prompt something like:
 
 ```
 Hi have a look at program.md and let's kick off a new experiment! let's do the setup first.
 ```
 
-The `program.md` file is essentially a super lightweight "skill".
+Point Claude, Codex, or any agent at this repo. The `program.md` file provides the experiment loop instructions. The agent modifies only `train.py`.
 
 ## Project structure
 
@@ -78,33 +89,22 @@ program.md      — agent instructions
 pyproject.toml  — dependencies
 ```
 
-## Design choices
-
-- **Single file to modify.** The agent only touches `train.py`. This keeps the scope manageable and diffs reviewable.
-- **Fixed time budget.** Training always runs for exactly 5 minutes, regardless of your specific platform. This means you can expect approx 12 experiments/hour and approx 100 experiments while you sleep. There are two upsides of this design decision. First, this makes experiments directly comparable regardless of what the agent changes (model size, batch size, architecture, etc). Second, this means that autoresearch will find the most optimal model for your platform in that time budget. The downside is that your runs (and results) become not comparable to other people running on other compute platforms.
-- **Self-contained.** No external dependencies beyond PyTorch and a few small packages. No distributed training, no complex configs. One GPU, one file, one metric.
-
 ## Platform support
 
-This fork's platform policy is explicit and tiered.
+Same GPU support matrix as [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx):
 
-- Supported desktop consumer GPUs (Ampere): `RTX 3060 12GB`, `RTX 3080 10GB`, `RTX 3080 12GB`, `RTX 3080 Ti 12GB`, `RTX 3090 24GB`, `RTX 3090 Ti 24GB`.
-- Supported desktop consumer GPUs (Ada): `RTX 4060 Ti 16GB`, `RTX 4070 12GB`, `RTX 4070 SUPER 12GB`, `RTX 4070 Ti 12GB`, `RTX 4070 Ti SUPER 16GB`, `RTX 4080 16GB`, `RTX 4080 SUPER 16GB`, `RTX 4090 24GB`.
-- Supported desktop consumer GPUs (Blackwell): `RTX 5060 Ti 16GB`, `RTX 5070 12GB`, `RTX 5070 Ti 16GB`, `RTX 5080 16GB`, `RTX 5090 32GB`.
-- Desktop only: laptop GPUs are not officially supported due to wide power and thermal variance.
-- 8 GB variants are explicitly out of matrix support, even when the model family name matches a supported desktop SKU.
-- Runtime path is intentionally unified across platforms: PyTorch SDPA attention + eager optimizer steps.
-- Runtime adaptation is profile-driven: compute capability, BF16/TF32 support, OS, and VRAM tier determine candidate batch sizes and checkpointing strategy.
-- Supported consumer profiles run a short eager-mode autotune pass and cache the selected candidate per GPU/runtime fingerprint.
-- Autotune env controls: `AUTORESEARCH_DISABLE_AUTOTUNE=1` skips probing; `AUTORESEARCH_AUTOTUNE_REFRESH=1` refreshes the cached decision.
-- Tested hardware in this repo remains RTX 3080 10 GB on Windows. Other listed SKUs are matrix-supported but may be less field-tested here.
-- Non-goals for this fork include FA3/H100-specialized paths, unofficial Triton-for-Windows stacks, AMD/ROCm, Apple Metal, and multi-GPU training.
-- Default dataset is `karpathy/tinystories_gpt4_clean` for consumer-GPU practicality.
+- **Ampere:** RTX 3060 12GB, 3070, 3080, 3080 Ti, 3090, 3090 Ti
+- **Ada:** RTX 4060 Ti 16GB, 4070, 4070 SUPER, 4070 Ti, 4070 Ti SUPER, 4080, 4080 SUPER, 4090
+- **Blackwell:** RTX 5060 Ti, 5070, 5070 Ti, 5080, 5090
+- Desktop only (no laptop GPUs). 8 GB variants not supported.
+- Tested on RTX 4080 SUPER 16GB, Windows 11.
 
 ## Notable forks
 
-- [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos)
-- [trevin-creator/autoresearch-mlx](https://github.com/trevin-creator/autoresearch-mlx)
+- [karpathy/autoresearch](https://github.com/karpathy/autoresearch) — original (Linux/H100)
+- [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx) — Windows port (SDPA + eager)
+- [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos) — macOS
+- [trevin-creator/autoresearch-mlx](https://github.com/trevin-creator/autoresearch-mlx) — Apple MLX
 
 ## License
 
