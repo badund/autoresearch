@@ -6,7 +6,7 @@ This fork builds on [jsegov/autoresearch-win-rtx](https://github.com/jsegov/auto
 
 ## Performance
 
-All benchmarks on RTX 4080 SUPER 16GB, Windows 11, 5-minute training budget, TinyStories dataset.
+All benchmarks on **RTX 3090 24GB**, Windows 11 (Driver 581.95, CUDA 13.0), 5-minute training budget, TinyStories dataset.
 
 | Version | val_bpb | MFU | Steps | Throughput | VRAM |
 |---------|---------|-----|-------|------------|------|
@@ -97,7 +97,7 @@ Same GPU support matrix as [jsegov/autoresearch-win-rtx](https://github.com/jseg
 - **Ada:** RTX 4060 Ti 16GB, 4070, 4070 SUPER, 4070 Ti, 4070 Ti SUPER, 4080, 4080 SUPER, 4090
 - **Blackwell:** RTX 5060 Ti, 5070, 5070 Ti, 5080, 5090
 - Desktop only (no laptop GPUs). 8 GB variants not supported.
-- Tested on RTX 4080 SUPER 16GB, Windows 11.
+- Tested on RTX 3090 24GB, Windows 11.
 
 ## Cross-Platform Comparison: MLX vs Windows + Triton
 
