@@ -7,6 +7,7 @@ Usage: uv run train.py
 import argparse
 import gc
 import json
+import math
 import os
 import platform
 import time
@@ -1136,8 +1137,8 @@ def _run_training_once(runtime, tokenizer, config, device_batch_size, smoke_test
         model.zero_grad(set_to_none=True)
 
         train_loss_f = train_loss.item()
-        if train_loss_f > 100:
-            raise RuntimeError("FAIL: training loss exploded")
+        if math.isnan(train_loss_f) or train_loss_f > 100:
+            raise RuntimeError("FAIL: training loss exploded or NaN")
 
         torch.cuda.synchronize()
         t1 = time.time()

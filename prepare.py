@@ -404,7 +404,6 @@ def get_token_bytes(device="cpu", dataset=None):
 def _document_batches(split, dataset=None, tokenizer_batch_size=128):
     dataset_name = _resolve_dataset_name(dataset)
     assert split in ("train", "val", "test")
-
     epoch = 1
     while True:
         batch = []
