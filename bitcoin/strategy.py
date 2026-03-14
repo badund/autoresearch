@@ -1,6 +1,6 @@
 """
 BTC trading strategy. This is the file the agent modifies.
-Exp77: Trailing stop 3200 from best
+Exp79: Trailing stop 3250 tracking lows
 """
 
 import sys
@@ -185,11 +185,12 @@ def strategy(bars: pd.DataFrame) -> float:
 
     # Trailing stop for shorts
     cur_close = close[-1]
+    cur_low = low[-1]
     if _last_position < -0.1:
-        if _best_price == 0.0 or cur_close < _best_price:
-            _best_price = cur_close
+        if _best_price == 0.0 or cur_low < _best_price:
+            _best_price = cur_low
         retrace = cur_close - _best_price
-        if retrace > 3200.0:
+        if retrace > 3250.0:
             signal = 0.0  # force exit
 
     target = _clamp(signal, -0.5, 0.0)
