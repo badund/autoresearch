@@ -1,6 +1,6 @@
 """
 BTC trading strategy. This is the file the agent modifies.
-Exp79: Trailing stop 3250 tracking lows
+Exp82: Informed flow 0.6 + trailing stop 3250 lows
 """
 
 import sys
@@ -158,7 +158,7 @@ def strategy(bars: pd.DataFrame) -> float:
     else:
         informed = 0.0
     if informed < -0.2:
-        signal *= 0.65
+        signal *= 0.6
 
     # Tick imbalance confirmation for shorts
     up10 = upticks[-10:].sum()
